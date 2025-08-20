@@ -151,39 +151,63 @@
         });
       }
 
-      function buildConstraints(deviceId) {
-        // Fallback: wenn keine deviceId vorhanden ist, verwende generische Constraints
-        const base = { audio: false, video: { width: { ideal: 1920 }, height: { ideal: 1080 } } };
-        if (deviceId) {
-          base.video.deviceId = { exact: deviceId };
-        }
-        return base;
-      }
-
       async function startStream(deviceId) {
         try {
-          // Stoppe vorherigen Stream
+          // Stop previous stream if any
           if (currentStream) currentStream.getTracks().forEach(t => t.stop());
 
-          const stream = await navigator.mediaDevices.getUserMedia(buildConstraints(deviceId));
+          // 1) Get an initial stream from the selected device (no fixed size yet)
+          const firstConstraints = {
+            audio: false,
+            video: deviceId ? { deviceId: { exact: deviceId } } : true
+          };
+
+          const stream = await navigator.mediaDevices.getUserMedia(firstConstraints);
           currentStream = stream;
           video.srcObject = stream;
 
-          // Warten bis Metadaten da sind -> dann play (hilft gegen "schwarzes Video")
+          // Wait for metadata so we have a track to work with
           await new Promise((resolve) => {
             if (video.readyState >= 1) return resolve();
             const onLoaded = () => { video.removeEventListener('loadedmetadata', onLoaded); resolve(); };
             video.addEventListener('loadedmetadata', onLoaded);
           });
 
-          // iOS/Autoplay-Policies: muted + playsinline sind bereits gesetzt
-          await video.play().catch(() => { /* Ignorieren – Nutzerinteraktion (Klick) startet es auch */ });
+          // 2) Try to push the track to its max native resolution using capabilities
+          const track = stream.getVideoTracks()[0];
+          if (track && typeof track.getCapabilities === 'function' && typeof track.applyConstraints === 'function') {
+            const caps = track.getCapabilities();
+            const desired = {};
+            if (caps.width && typeof caps.width.max === 'number') desired.width = caps.width.max;
+            if (caps.height && typeof caps.height.max === 'number') desired.height = caps.height.max;
+            // Some cameras support frameRate ranges too – we leave it unset to avoid overconstraining
+            if (Object.keys(desired).length) {
+              try {
+                await track.applyConstraints(desired);
+              } catch (_) {
+                // If applying exact max fails (rare), try advanced block as fallback
+                try { await track.applyConstraints({ advanced: [desired] }); } catch (_) { /* ignore */ }
+              }
+            }
+          }
+
+          await video.play().catch(() => {});
+
+          // Informative toast of resulting resolution
+          // Wait a tick so videoWidth/Height reflect new constraints
+          await new Promise(r => setTimeout(r, 50));
+          const w = video.videoWidth, h = video.videoHeight;
+          if (w && h) {
+            showToast(`Kamera läuft bei ${w}×${h} (maximiert)`, 'success');
+          } else {
+            showToast('Kamera gestartet (Auflösung wird vom Browser ausgehandelt).', 'success');
+          }
         } catch (err) {
           showToast('Konnte Kamera nicht starten: ' + err.message, 'error');
         }
       }
 
-      function timestampName() {
+      function timestampName() {() {
         const d = new Date();
         const p = n => String(n).padStart(2, '0');
         return `foto-${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.png`;
